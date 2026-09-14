@@ -13,6 +13,10 @@ services:
       - ./Voices:/app/Voices
       # Config is mounted read-write so settings UI can save changes
       - ./config:/app/config
+      # DH_live 数字人资产（wasm/形象视频/桥接 js，~17MB）脱离镜像热更新：
+      # git pull 后立即生效，无需 rebuild。注意：整目录覆盖镜像层同名路径，
+      # 删除宿主机该目录会导致容器内资源为空；换形象/改渲染器走 git 即可。
+      - ./static:/app/static
       # .env for API keys (copy from .env.example first)
       - ./.env:/app/.env:ro
     environment:

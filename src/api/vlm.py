@@ -10,15 +10,22 @@ POST /vlm
 POST /sessions/{session_id}/screenshot
     Frontend uploads a screenshot for ASE to read.
     Stores base64 in session.last_screenshot_b64 (in-memory, no persistence).
+
+POST /sessions/{session_id}/upload_image
+    Frontend uploads an image file for chat.
+    Saves image to disk, sends to VLM for description, returns file URL.
 """
+import base64
 import logging
+import os
 import time
 import traceback
+import uuid
 from string import Template
 
 from src.config.prompt_loader import get_prompt
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -137,6 +144,68 @@ async def upload_screenshot(session_id: str, body: ScreenshotUploadRequest,
     logger.debug("[VLM] screenshot uploaded session=%s triggered_by=%s size~%d bytes",
                  session_id, body.triggered_by, image_bytes)
     return {"ok": True}
+
+
+@router.post("/sessions/{session_id}/upload_image")
+async def upload_image_for_chat(
+    session_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+):
+    """Frontend uploads an image file for chat analysis.
+
+    Saves image to disk under uploads/images/ and returns the file URL.
+    Does NOT call VLM separately - the image will be sent directly to the
+    main chat LLM to avoid extra API calls and rate limits.
+
+    Returns:
+        {
+            "ok": true,
+            "image_url": "/uploads/images/{filename}"
+        }
+    """
+    sm = request.app.state.session_manager
+    session = sm.get_by_id(session_id)
+    if session is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "session not found"})
+
+    # Validate file type
+    if not file.content_type or not file.content_type.startswith("image/"):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "File must be an image"})
+
+    try:
+        # Read file content
+        content = await file.read()
+        if not content:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "Empty file"})
+
+        # Generate unique filename
+        ext = os.path.splitext(file.filename or "image.jpg")[1] or ".jpg"
+        filename = f"{uuid.uuid4().hex[:12]}{ext}"
+
+        # Determine upload directory (relative to server root)
+        upload_dir = os.path.join("uploads", "images")
+        os.makedirs(upload_dir, exist_ok=True)
+        filepath = os.path.join(upload_dir, filename)
+
+        # Save file to disk
+        with open(filepath, "wb") as f:
+            f.write(content)
+
+        image_url = f"/uploads/images/{filename}"
+
+        logger.debug("[VLM] image uploaded session=%s filename=%s size=%d bytes",
+                     session_id, filename, len(content))
+
+        return {
+            "ok": True,
+            "image_url": image_url,
+        }
+
+    except Exception as e:
+        logger.error("[VLM] upload_image error: %s", e)
+        log_error("upload_image", str(e), {"session_id": session_id}, traceback_str=traceback.format_exc())
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
 def _screen_prompt(ocr_prefix: str) -> str:

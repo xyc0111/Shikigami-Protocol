@@ -104,7 +104,7 @@ class HistorySegment(PromptSegment):
     def build(self, ctx: BuildContext) -> SegmentResult:
         extras = ctx.extras or {}
         reply_as = extras.get("group_reply_as_sender")
-        user_name = extras.get("group_user_name") or "用户"
+        user_name = extras.get("group_user_name") or "我"
         current_group_gname = extras.get("current_group_gname")
         app = extras.get("app")
         merge_enabled = (ctx.profile or {}).get("memory_config", {}).get("group_chat_merge_into_history") is not False

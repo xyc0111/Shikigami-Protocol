@@ -138,7 +138,7 @@ def get_merged_recent_messages(
                     content = (m.get("content") or "").strip()
                     if not content:
                         continue
-                    sender = (m.get("sender") or "").strip() or ("用户" if role == "user" else "助手")
+                    sender = (m.get("sender") or "").strip() or ("我" if role == "user" else "助手")
                     combined.append({
                         "ts": float(m.get("timestamp") or 0),
                         "role": role,

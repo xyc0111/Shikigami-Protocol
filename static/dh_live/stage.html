@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数字人视频聊天</title>
+<!--
+  DH_live 视频聊天独立页（从主应用 🎭 按钮打开，也可直接访问 /dh_live/stage.html）。
+  组成：桥接层渲染数字人舞台 + 左下角聊天面板（文本/图片）。
+  链路：输入文本(+图片经 /vlm 描述) → POST /chat (SSE) → 回复分句 →
+        WS /ws/tts?format=dh → 16k WAV → WebAudio 播放 + pushPaced 驱动口型。
+  支持 ?avatar=avatars/dh_female_01 指定初始形象。
+-->
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* 独立页不需要「数字人通话 · ××」标题：隐藏但占位，右上静音/关闭按钮位置不变 */
+  #dh-call-title { visibility: hidden; }
+  html, body { width: 100%; height: 100%; background: #0b0d12; overflow: hidden;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+
+  /* ───── 聊天面板（浮在数字人舞台之上） ───── */
+  #dh-chat {
+    position: fixed; left: 16px; bottom: 16px; z-index: 9500;
+    width: 400px; max-width: calc(100vw - 32px);
+    max-height: min(62vh, 560px);
+    display: flex; flex-direction: column;
+    background: rgba(13, 16, 24, 0.92);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+    backdrop-filter: blur(10px);
+    color: #e8edf7;
+  }
+  #dh-chat.min { display: none; }   /* 收起状态：整个面板隐藏，左下角浮标唤回 */
+  #dh-chat-min { flex: none; width: 24px; height: 24px; border: none;
+    border-radius: 7px; background: rgba(255,255,255,0.08); color: #9aa4b8;
+    font-size: 13px; line-height: 24px; text-align: center; cursor: pointer; padding: 0; }
+  #dh-chat-min:hover { background: rgba(255,255,255,0.16); color: #e8edf7; }
+
+  /* 收起状态的左下角唤回浮标（含未读数角标） */
+  #dh-chat-toggle { position: fixed; left: 16px; bottom: 16px; z-index: 9500;
+    display: none; align-items: center; gap: 7px; padding: 9px 16px;
+    border-radius: 999px; border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(13, 16, 24, 0.92); color: #e8edf7; font-size: 13px;
+    cursor: pointer; backdrop-filter: blur(10px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+  #dh-chat-toggle.show { display: inline-flex; }
+  #dh-chat-toggle:hover { background: rgba(38, 46, 62, 0.95); }
+  #dh-chat-toggle .badge { display: none; min-width: 18px; height: 18px;
+    border-radius: 9px; background: #ef4444; color: #fff; font-size: 11px;
+    line-height: 18px; text-align: center; padding: 0 5px; font-weight: 600; }
+  #dh-chat-toggle .badge.show { display: block; }
+  #dh-chat-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  #dh-chat-head .dot { width: 8px; height: 8px; border-radius: 50%;
+    background: #6b7280; flex: none; transition: background .2s; }
+  #dh-chat-head .dot.ok { background: #34d399; }
+  #dh-chat-head .dot.err { background: #f87171; }
+  #dh-chat-head .tts-state { font-size: 11px; color: #9aa4b8; }
+  #dh-chat-head select {
+    margin-left: auto; appearance: none;
+    background: rgba(255,255,255,0.08); color: #e8edf7;
+    border: 1px solid rgba(255,255,255,0.16); border-radius: 8px;
+    padding: 4px 8px; font-size: 12px; cursor: pointer; max-width: 130px;
+  }
+  #dh-chat-head select option { background: #14181f; }
+  #dh-msgs { flex: 1; overflow-y: auto; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 8px; min-height: 120px; }
+  #dh-msgs::-webkit-scrollbar { width: 6px; }
+  #dh-msgs::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 3px; }
+  .dh-msg { max-width: 86%; padding: 7px 11px; border-radius: 12px;
+    font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .dh-msg.user { align-self: flex-end;
+    background: #2f5fe0; color: #fff; border-bottom-right-radius: 4px; }
+  .dh-msg.assistant { align-self: flex-start;
+    background: rgba(255,255,255,0.09); border-bottom-left-radius: 4px; }
+  .dh-msg.sys { align-self: center; background: transparent;
+    color: #f0a05a; font-size: 12px; padding: 2px 6px; }
+  .dh-msg img { display: block; max-width: 200px; max-height: 140px;
+    border-radius: 8px; margin-bottom: 4px; cursor: zoom-in; }
+  .dh-msg.typing::after { content: "▍"; animation: dhblink 1s steps(1) infinite; }
+  @keyframes dhblink { 50% { opacity: 0; } }
+
+  #dh-img-preview { display: none; padding: 0 12px 6px; }
+  #dh-img-preview.show { display: block; }
+  #dh-img-preview .wrap { position: relative; display: inline-block; }
+  #dh-img-preview img { max-height: 72px; border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.18); display: block; }
+  #dh-img-preview .rm { position: absolute; top: -7px; right: -7px;
+    width: 20px; height: 20px; border-radius: 50%; border: none;
+    background: #ef4444; color: #fff; font-size: 12px; line-height: 20px;
+    text-align: center; cursor: pointer; }
+
+  #dh-chat-foot { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px 12px; }
+  #dh-btn-img { flex: none; width: 36px; height: 36px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.08);
+    color: #e8edf7; font-size: 16px; cursor: pointer; }
+  #dh-btn-img:hover { background: rgba(255,255,255,0.16); }
+  #dh-input { flex: 1; resize: none; height: 38px; max-height: 96px;
+    background: rgba(255,255,255,0.08); color: #e8edf7;
+    border: 1px solid rgba(255,255,255,0.16); border-radius: 10px;
+    padding: 9px 11px; font-size: 13px; line-height: 1.45;
+    font-family: inherit; outline: none; }
+  #dh-input:focus { border-color: rgba(138,180,255,0.55); }
+  #dh-input::placeholder { color: #6b7688; }
+  #dh-btn-send { flex: none; height: 38px; padding: 0 18px; border: none;
+    border-radius: 10px; background: #2f5fe0; color: #fff;
+    font-size: 13px; font-weight: 600; cursor: pointer; }
+  #dh-btn-send:hover:not(:disabled) { background: #3d6ff0; }
+  #dh-btn-send:disabled { opacity: 0.45; cursor: default; }
+
+  /* ───── 画面被关闭后的重开按钮 ───── */
+  #dh-reopen { position: fixed; right: 16px; bottom: 16px; z-index: 9500;
+    display: none; padding: 9px 16px; border-radius: 10px; border: none;
+    background: #2f5fe0; color: #fff; font-size: 13px; cursor: pointer; }
+  #dh-reopen.show { display: block; }
+  #dh-reopen:hover { background: #3d6ff0; }
+
+  @media (max-width: 520px) {
+    #dh-chat { width: calc(100vw - 24px); left: 12px; bottom: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="dh-chat">
+  <div id="dh-chat-head">
+    <span class="dot" id="dh-tts-dot"></span>
+    <span class="tts-state" id="dh-tts-state">TTS 未连接</span>
+    <select id="dh-avatar-select" title="选择人物形象"></select>
+    <button type="button" id="dh-chat-min" title="收起聊天窗口">—</button>
+  </div>
+  <div id="dh-msgs"></div>
+  <div id="dh-img-preview">
+    <div class="wrap">
+      <img id="dh-img-thumb" alt="">
+      <button type="button" class="rm" id="dh-img-remove" title="移除图片">✕</button>
+    </div>
+  </div>
+  <div id="dh-chat-foot">
+    <button type="button" id="dh-btn-img" title="附加图片">📎</button>
+    <textarea id="dh-input" rows="1"
+      placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+    <button type="button" id="dh-btn-send">发送</button>
+    <input type="file" id="dh-file" accept="image/*" hidden>
+  </div>
+</div>
+
+<button type="button" id="dh-reopen" title="重新打开数字人画面">🎭 打开画面</button>
+<button type="button" id="dh-chat-toggle" title="打开聊天窗口">💬 聊天<span class="badge" id="dh-chat-unread"></span></button>
+
+<script src="js/dh_live_bridge.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (s) { return document.querySelector(s); };
+  var WS_BASE = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+  var CLIENT_ID = 'dh-stage-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  var _dh = window.DHLiveAvatar;
+
+  var input = $('#dh-input'), sendBtn = $('#dh-btn-send'), msgs = $('#dh-msgs');
+  var fileInput = $('#dh-file'), previewWrap = $('#dh-img-preview'), thumb = $('#dh-img-thumb');
+  var ttsDot = $('#dh-tts-dot'), ttsState = $('#dh-tts-state'), reopenBtn = $('#dh-reopen');
+  var chatPanel = $('#dh-chat'), chatToggle = $('#dh-chat-toggle'), unreadBadge = $('#dh-chat-unread');
+
+  var pendingB64 = '';        // 附加图片的 base64（不带 data: 前缀）
+  var pendingUrl = '';        // 气泡里展示用的 objectURL
+  var busy = false;
+  var unread = 0;             // 收起期间积攒的新消息数
+
+  /* ───────────── 聊天面板收起/展开（默认收起） ───────────── */
+  function updateUnreadBadge() {
+    unreadBadge.textContent = unread > 99 ? '99+' : String(unread);
+    unreadBadge.classList.toggle('show', unread > 0);
+  }
+  function setChatOpen(open) {
+    chatPanel.classList.toggle('min', !open);
+    chatToggle.classList.toggle('show', !open);
+    if (open) { unread = 0; updateUnreadBadge(); input.focus(); }
+  }
+  $('#dh-chat-min').addEventListener('click', function () { setChatOpen(false); });
+  chatToggle.addEventListener('click', function () { setChatOpen(true); });
+
+  /* ───────── 形象 → 音色绑定（方案 A） ─────────
+   * 值填 profile 的「显示名」（/profiles 里的 display_name），页面加载时自动解析成 id。
+   * 没出现在这里的形象用后端默认音色。改绑只动这张表。 */
+  var AVATAR_VOICE_MAP = {
+    'avatars/dh_male_01':   '颜究生小夏',
+    'avatars/dh_female_01': '情绪回收站老李'
+  };
+  var profileIdByAvatar = {};      // avatarId -> profile_id（解析结果）
+  var currentVoiceProfileId = '';  // 当前形象的音色 profile_id
+
+  /* ───────────────────────── 气泡 ───────────────────────── */
+
+  function addBubble(role, text, imgUrl) {
+    var div = document.createElement('div');
+    div.className = 'dh-msg ' + role;
+    if (imgUrl) {
+      var img = document.createElement('img');
+      img.src = imgUrl;
+      img.addEventListener('click', function () { window.open(imgUrl, '_blank'); });
+      div.appendChild(img);
+    }
+    if (text) div.appendChild(document.createTextNode(text));
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+    // 面板收起时统计新消息（系统提示不计），唤回浮标上亮未读角标
+    if (chatPanel.classList.contains('min') && role !== 'sys') {
+      unread++; updateUnreadBadge();
+    }
+    return div;
+  }
+
+  function setBusy(v) {
+    busy = v;
+    sendBtn.disabled = v;
+    sendBtn.textContent = v ? '…' : '发送';
+  }
+
+  /* ───────────────────── 形象选择 ───────────────────── */
+
+  var FALLBACK_AVATARS = [
+    { id: 'avatars/dh_male_01',   name: '形象一' },
+    { id: 'avatars/dh_female_01', name: '形象二' }
+  ];
+  var manifestAvatars = [];   // manifest 清单，供选项重建用
+
+  /** 选项与 Shikigami 后台一致：绑定了音色的形象直接显示后台角色名，
+   *  未绑定的形象保留 manifest 原名排在后面。 */
+  function rebuildAvatarOptions(sel) {
+    var current = sel.value;
+    sel.innerHTML = '';
+    var added = {};
+    Object.keys(AVATAR_VOICE_MAP).forEach(function (aid) {
+      if (!profileIdByAvatar[aid]) return;
+      var o = document.createElement('option');
+      o.value = aid;
+      o.textContent = AVATAR_VOICE_MAP[aid];
+      sel.appendChild(o);
+      added[aid] = true;
+    });
+    manifestAvatars.forEach(function (a) {
+      if (added[a.id]) return;
+      var o = document.createElement('option');
+      o.value = a.id;
+      o.textContent = a.name;
+      sel.appendChild(o);
+    });
+    var has = Array.prototype.some.call(sel.options, function (o) { return o.value === current; });
+    if (has) sel.value = current;
+    else if (sel.firstElementChild) sel.value = sel.firstElementChild.value;
+  }
+
+  async function initAvatarPicker() {
+    var sel = $('#dh-avatar-select');
+    var list = [];
+    try {
+      var r = await fetch('avatars/manifest.json');
+      if (r.ok) {
+        var d = await r.json();
+        list = (d.avatars || []).map(function (a) {
+          return { id: a.id || a.dir || a.path, name: a.name || a.label || a.id };
+        }).filter(function (a) { return a.id; });
+      }
+    } catch (_) { /* 离线/旧镜像：用内置清单 */ }
+    if (!list.length) list = FALLBACK_AVATARS;
+    manifestAvatars = list;
+
+    list.forEach(function (a) {
+      var o = document.createElement('option');
+      o.value = a.id; o.textContent = a.name;
+      sel.appendChild(o);
+    });
+
+    var want = new URLSearchParams(location.search).get('avatar');
+    var current = (_dh && _dh.currentAvatar) ? _dh.currentAvatar() : '';
+    var pick = list.some(function (a) { return a.id === want; }) ? want
+             : list.some(function (a) { return a.id === current; }) ? current
+             : list[0].id;
+    sel.value = pick;
+
+    sel.addEventListener('change', function () {
+      if (!_dh || typeof _dh.switchAvatar !== 'function') return;
+      _dh.switchAvatar(sel.value).catch(function (e) {
+        addBubble('sys', '切换形象失败：' + (e && e.message || e));
+      });
+      applyVoiceBinding(sel.value, true);
+    });
+    return pick;
+  }
+
+  /* ───────── 形象 → 音色解析与切换 ───────── */
+
+  async function resolveVoiceBindings() {
+    try {
+      var r = await fetch('/profiles');
+      if (!r.ok) return;
+      var d = await r.json();
+      var list = Array.isArray(d) ? d : (d.profiles || []);
+      var byName = {};
+      list.forEach(function (p) {
+        var n = (p.display_name || p.name || '').trim();
+        if (n && (p.id || p.profile_id)) byName[n] = p.id || p.profile_id;
+      });
+      Object.keys(AVATAR_VOICE_MAP).forEach(function (aid) {
+        var pid = byName[AVATAR_VOICE_MAP[aid]];
+        if (pid) profileIdByAvatar[aid] = pid;
+      });
+      // 解析成功后重建下拉：绑定的形象显示后台角色名
+      rebuildAvatarOptions($('#dh-avatar-select'));
+    } catch (_) { /* 拉不到 profiles 就全走默认音色 */ }
+  }
+
+  /** 切换形象时同步音色；announce=true 时在聊天区提示绑定结果。 */
+  function applyVoiceBinding(avatarId, announce) {
+    currentVoiceProfileId = profileIdByAvatar[avatarId] || '';
+    if (!announce) return;
+    var boundName = AVATAR_VOICE_MAP[avatarId];
+    if (currentVoiceProfileId) {
+      addBubble('sys', '音色已切换：' + boundName);
+    } else {
+      addBubble('sys', boundName
+        ? '未找到名为「' + boundName + '」的角色，使用默认音色'
+        : '该形象未绑定音色，使用默认音色');
+    }
+  }
+
+  /* ───────────────── 图片 → VLM 描述 ───────────────── */
+
+  async function describeImage(b64) {
+    try {
+      var sid = '';
+      try {
+        var sr = await fetch('/sessions/current');
+        if (sr.ok) { var sd = await sr.json(); sid = sd.id || sd.session_id || ''; }
+      } catch (_) {}
+      var r = await fetch('/vlm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, image_b64: b64, source: 'chat', image_type: 'upload' })
+      });
+      if (r.ok) {
+        var d = await r.json();
+        return d.description || '';
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  function clearPendingImage() {
+    pendingB64 = ''; pendingUrl = '';
+    if (pendingUrl) { /* objectURL 已在气泡里复用，这里不 revoke */
+    }
+    previewWrap.classList.remove('show');
+    thumb.removeAttribute('src');
+    fileInput.value = '';
+  }
+
+  $('#dh-btn-img').addEventListener('click', function () { fileInput.click(); });
+  $('#dh-img-remove').addEventListener('click', function () {
+    if (pendingUrl) try { URL.revokeObjectURL(pendingUrl); } catch (_) {}
+    clearPendingImage();
+  });
+  fileInput.addEventListener('change', function () {
+    var f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    if (pendingUrl) try { URL.revokeObjectURL(pendingUrl); } catch (_) {}
+    pendingUrl = URL.createObjectURL(f);
+    var reader = new FileReader();
+    reader.onload = function () {
+      var dataUrl = String(reader.result || '');
+      var idx = dataUrl.indexOf(',');
+      pendingB64 = idx >= 0 ? dataUrl.slice(idx + 1) : '';
+      thumb.src = pendingUrl;
+      previewWrap.classList.add('show');
+    };
+    reader.readAsDataURL(f);
+  });
+
+  /* ───────────────── 聊天：POST /chat (SSE) ───────────────── */
+
+  async function chatStream(message, liveBubble, onToken) {
+    var resp = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: message, client_id: CLIENT_ID, image_url: '' })
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var reader = resp.body.getReader();
+    var dec = new TextDecoder();
+    var buf = '', full = '';
+    while (true) {
+      var chunk = await reader.read();
+      if (chunk.done) break;
+      buf += dec.decode(chunk.value, { stream: true });
+      var lines = buf.split('\n');
+      buf = lines.pop();
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        if (line.indexOf('data: ') !== 0) continue;
+        try {
+          var d = JSON.parse(line.slice(6));
+          if (d.error) throw new Error(d.error);
+          if (d.token) {
+            full += d.token;
+            if (liveBubble) { liveBubble.textContent = full; msgs.scrollTop = msgs.scrollHeight; }
+            if (onToken) onToken(d.token);
+          }
+        } catch (e) {
+          if (e instanceof SyntaxError) continue;   // 忽略残缺行
+          throw e;
+        }
+      }
+    }
+    return full;
+  }
+
+  /* ─────────── TTS（format=dh）+ 口型驱动 + 播放 ─────────── */
+
+  var audioCtx = null, ttsWs = null;
+  var queue = [], playing = false, currentSrc = null;
+  var gen = 0;                 // 代际号：stop/新发言后 +1，晚到的旧分句直接丢弃
+  var ttsBuf = '';             // 流式回复中尚未送 TTS 的文本残留
+  var pendingSends = [];       // WS 还没连上时暂存的待合成句
+  var activeVoiceProfileId = '';  // 本轮回复锁定的音色（回复中途切形象不影响本轮）
+
+  function setTtsState(ok, text) {
+    ttsDot.className = 'dot' + (ok === true ? ' ok' : ok === false ? ' err' : '');
+    ttsState.textContent = text;
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) audioCtx = new AC();
+    }
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    if (!ttsWs || ttsWs.readyState > 1) connectTTS();
+  }
+
+  function connectTTS() {
+    if (ttsWs) { try { ttsWs.close(); } catch (_) {} }
+    setTtsState(null, 'TTS 连接中…');
+    ttsWs = new WebSocket(WS_BASE + '/ws/tts?format=dh');
+    ttsWs.binaryType = 'arraybuffer';
+    ttsWs.onopen = function () {
+      setTtsState(true, 'TTS 已连接');
+      var ps = pendingSends; pendingSends = [];
+      ps.forEach(sendTtsText);       // 连接就绪后冲掉暂存句
+    };
+    ttsWs.onerror = function () { setTtsState(false, 'TTS 连接失败'); };
+    ttsWs.onclose = function () { if (!ttsWs || ttsWs.readyState > 1) setTtsState(null, 'TTS 未连接'); };
+    ttsWs.onmessage = function (ev) {
+      if (ev.data && ev.data.byteLength > 0) {
+        queue.push({ data: ev.data, gen: gen });
+        if (!playing) playNext();
+      }
+    };
+  }
+
+  function stopSpeech() {
+    gen++;
+    queue = [];
+    pendingSends = [];
+    ttsBuf = '';
+    if (currentSrc) { try { currentSrc.stop(); } catch (_) {} currentSrc = null; }
+    playing = false;
+    try { if (_dh && _dh.interrupt) _dh.interrupt(); } catch (_) {}
+  }
+
+  /** 送一句去合成；WS 未就绪时暂存，open 后由 onopen 统一冲出。 */
+  function sendTtsText(s) {
+    s = (s || '').trim();
+    if (!s) return;
+    if (!ttsWs || ttsWs.readyState !== WebSocket.OPEN) {
+      pendingSends.push(s);
+      ensureAudio();
+      return;
+    }
+    if (activeVoiceProfileId) {
+      // 与群聊同协议：按 profile 音色合成（后端逐条重建配置，可随时切换）
+      ttsWs.send(JSON.stringify({ text: s, profile_id: activeVoiceProfileId }));
+    } else {
+      ttsWs.send(s);
+    }
+  }
+
+  /** 回复开始：打断上一轮，锁定本轮音色。 */
+  function beginSpeak() {
+    stopSpeech();
+    ensureAudio();
+    activeVoiceProfileId = currentVoiceProfileId;
+  }
+
+  /* ── 边生成边读：token 流里凑满一句（句末标点/长句逗号/60 字兜底）立刻送 TTS。
+      代码围栏未闭合时憋住，闭合后整段剔除（不读代码）；表格行/分隔线同样剔除。 ── */
+  var TTS_DELIM = /[。！？\n，、；]/;
+
+  function feedTtsStream(token) {
+    ttsBuf += token;
+    var fenceCount = ttsBuf.split('```').length - 1;
+    if (fenceCount % 2 === 1) return;                    // 围栏开着，等闭合再处理
+    if (fenceCount) ttsBuf = ttsBuf.replace(/```[\s\S]*?```/g, '');  // 剔除完整围栏（不读代码）
+    ttsBuf = ttsBuf
+      .replace(/^\|.*\|[ \t]*$/gm, '')
+      .replace(/^[ \t]*[-=*_]{3,}[ \t]*$/gm, '');
+    while (ttsBuf.length) {
+      var cut = -1;
+      for (var i = 0; i < ttsBuf.length; i++) {
+        if (TTS_DELIM.test(ttsBuf[i])) { cut = i; break; }
+        if (i >= 60) { cut = i; break; }     // 无标点超长兜底硬切，防止整段憋住
+      }
+      if (cut < 0) break;
+      var chunk = ttsBuf.slice(0, cut + 1).trim();
+      ttsBuf = ttsBuf.slice(cut + 1);
+      if (chunk) sendTtsText(chunk);
+    }
+  }
+
+  /** 回复结束（done/中断）时冲掉最后一段残留。 */
+  function flushTtsStream() {
+    var rest = ttsBuf
+      .replace(/```[\s\S]*?```/g, '')
+      .replace(/^\|.*\|[ \t]*$/gm, '')
+      .replace(/^[ \t]*[-=*_]{3,}[ \t]*$/gm, '')
+      .trim();
+    ttsBuf = '';
+    if (rest) sendTtsText(rest);
+  }
+
+  async function playNext() {
+    if (playing) return;
+    var item = queue.shift();
+    if (!item) return;
+    if (item.gen !== gen) { playNext(); return; }   // 已被停止的旧分句
+    playing = true;
+    try {
+      var u8 = new Uint8Array(item.data.slice(0));          // pushPaced 用
+      var buf = await audioCtx.decodeAudioData(item.data.slice(0));  // decode 会 detach
+      if (item.gen !== gen) { playing = false; playNext(); return; }
+      var src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      var dest = (_dh && _dh.isOpen && _dh.isOpen() && _dh.audioDestination)
+        ? (_dh.audioDestination(audioCtx) || audioCtx.destination)
+        : audioCtx.destination;
+      src.connect(dest);
+      if (_dh && _dh.isReady && _dh.isReady() && typeof _dh.pushPaced === 'function') {
+        _dh.pushPaced(u8, buf.duration);   // 按播放节奏推口型，支持打断
+      }
+      src.onended = function () { playing = false; currentSrc = null; playNext(); };
+      currentSrc = src;
+      src.start();
+    } catch (e) {
+      console.warn('[DHLiveStage] 音频解码失败，跳过该分句:', e);
+      playing = false;
+      playNext();
+    }
+  }
+
+  /* ───────────────────── 发送主流程 ───────────────────── */
+
+  async function sendMessage() {
+    if (busy) return;
+    var text = input.value.trim();
+    var hasImg = !!pendingB64;
+    if (!text && !hasImg) return;
+    ensureAudio();
+
+    var bubbleUrl = pendingUrl;    // 气泡复用这个 objectURL
+    var b64 = pendingB64;
+    input.value = ''; input.style.height = 'auto';
+    addBubble('user', text, bubbleUrl);
+    pendingUrl = '';               // objectURL 所有权交给气泡，不再随移除按钮清掉
+    clearPendingImage();
+
+    setBusy(true);
+    var live = null;
+    try {
+      var messageToSend = text;
+      if (hasImg) {
+        var note = addBubble('sys', '图片识别中…');
+        var desc = await describeImage(b64);
+        note.textContent = desc ? '图片描述：' + desc.slice(0, 60) + (desc.length > 60 ? '…' : '')
+                                : '图片描述获取失败，仅发送文字';
+        if (desc) messageToSend = (messageToSend ? messageToSend + '\n' : '') + '[图片描述：' + desc + ']';
+      }
+      live = addBubble('assistant', '');
+      live.classList.add('typing');
+      beginSpeak();   // 打断上一轮 + 锁定本轮音色，token 流逐句喂给 TTS
+      var reply = await chatStream(messageToSend, live, feedTtsStream);
+      flushTtsStream();          // 最后一段不满句的残留
+      live.classList.remove('typing');
+      if (!reply.trim()) live.textContent = '（空回复）';
+      msgs.scrollTop = msgs.scrollHeight;
+    } catch (e) {
+      ttsBuf = '';               // 中途出错：丢弃未送出的残留，已入队语音播完为止
+      if (live) live.remove();
+      addBubble('sys', '发送失败：' + (e && e.message || e));
+    } finally {
+      setBusy(false);
+      input.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+  input.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); sendMessage(); }
+  });
+  input.addEventListener('input', function () {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 96) + 'px';
+  });
+
+  /* ─────────── 舞台开关联动（桥接层顶栏的关闭按钮） ─────────── */
+
+  reopenBtn.addEventListener('click', function () {
+    _dh.open({ avatarId: $('#dh-avatar-select').value }).catch(function () {});
+  });
+  if (_dh && _dh.on) {
+    _dh.on('close', function () { reopenBtn.classList.add('show'); });
+    _dh.on('open', function () { reopenBtn.classList.remove('show'); });
+    _dh.on('error', function (e) {
+      addBubble('sys', '渲染器错误：' + (e && e.message || e));
+    });
+  }
+
+  /* ───────────────────── 启动 ───────────────────── */
+
+  (async function boot() {
+    setChatOpen(false);                 // 默认收起聊天窗口，左下角 💬 浮标唤回
+    var avatar = await initAvatarPicker();
+    await resolveVoiceBindings();       // 解析 形象→profile_id，失败则全走默认音色
+    applyVoiceBinding(avatar, false);   // 静默应用到初始形象
+    if (currentVoiceProfileId) {
+      addBubble('sys', '当前音色：' + AVATAR_VOICE_MAP[avatar]);
+    }
+    var loadNote = addBubble('sys', '数字人渲染器加载中，就绪后即可对话');
+    var markReady = function () {
+      loadNote.textContent = '数字人已就绪，直接输入消息开聊';
+      setTimeout(function () { if (loadNote.parentNode) loadNote.remove(); }, 4000);
+    };
+    _dh.on('ready', markReady);          // 兜底：open 返回前已 ready 也能收到
+    try {
+      await _dh.open({ avatarId: avatar });
+      if (_dh.isReady && _dh.isReady()) markReady();
+    } catch (e) {
+      loadNote.textContent = '数字人初始化失败：' + (e && e.message || e);
+    }
+    input.focus();
+  })();
+})();
+</script>
+</body>
+</html>

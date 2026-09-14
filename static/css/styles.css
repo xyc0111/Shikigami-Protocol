@@ -985,6 +985,24 @@ html, body {
   border-color: var(--accent) !important;
 }
 
+.bubble-image {
+  margin-bottom: 8px;
+}
+
+.bubble-image img {
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: block;
+  object-fit: cover;
+  transition: transform 0.2s ease;
+}
+
+.bubble-image img:hover {
+  transform: scale(1.02);
+}
+
 .cursor {
   display: inline-block;
   width: 2px;

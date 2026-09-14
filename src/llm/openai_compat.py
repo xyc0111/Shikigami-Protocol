@@ -72,6 +72,23 @@ class OpenAICompatProvider(LLMProvider):
         self._gen_kwargs = {k: v for k, v in all_gen_kwargs.items() if k not in unsupported}
         self._extra_body = kwargs.get("extra_body") or None
 
+    def _prepare_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Prepare messages for API call, handling both text and image content.
+
+        Messages can have:
+        - content as str: simple text message
+        - content as list: multimodal message with text and/or image_url blocks
+        """
+        prepared = []
+        for msg in messages:
+            if isinstance(msg.get("content"), list):
+                # Already multimodal format, pass through
+                prepared.append(msg)
+            else:
+                # Text-only, normalize as before
+                prepared.append({"role": msg["role"], "content": msg.get("content", "")})
+        return _normalize_messages(prepared)
+
     async def stream_chat(
         self, messages: List[Dict[str, str]], **kwargs
     ) -> AsyncGenerator[str, None]:
@@ -81,7 +98,7 @@ class OpenAICompatProvider(LLMProvider):
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
-                messages=_normalize_messages(messages),
+                messages=self._prepare_messages(messages),
                 stream=True,
                 **merged,
             )
@@ -110,7 +127,7 @@ class OpenAICompatProvider(LLMProvider):
         try:
             result = await self.client.chat.completions.create(
                 model=self.model,
-                messages=_normalize_messages(messages),
+                messages=self._prepare_messages(messages),
                 stream=False,
                 **merged,
             )

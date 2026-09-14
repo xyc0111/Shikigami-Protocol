@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import json
 import logging
+import os
 import time
 import traceback
 from datetime import date, timedelta
@@ -28,6 +30,7 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     message: str
     client_id: str = ""   # sender UUID — other clients use this to skip duplicates
+    image_url: str = ""   # 上传图片的URL路径（可选）
 
 
 @router.post("/chat")
@@ -73,6 +76,41 @@ async def chat_endpoint(request: Request, body: ChatRequest):
             )
             llm = get_provider(preset)
 
+            # ── Include image in user message if image_url is provided ──
+            if body.image_url:
+                image_path = body.image_url.lstrip("/")
+                if os.path.exists(image_path):
+                    try:
+                        with open(image_path, "rb") as img_file:
+                            image_b64 = base64.b64encode(img_file.read()).decode("utf-8")
+
+                        # Detect MIME type
+                        ext = os.path.splitext(image_path)[1].lower()
+                        mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
+                        mime = mime_map.get(ext, "image/jpeg")
+
+                        # Find the last user message and convert to multimodal format
+                        for i in range(len(messages) - 1, -1, -1):
+                            if messages[i].get("role") == "user":
+                                text_content = messages[i].get("content", "")
+                                messages[i] = {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": text_content,
+                                        },
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {"url": f"data:{mime};base64,{image_b64}"},
+                                        },
+                                    ],
+                                }
+                                logger.debug("[chat] included image in user message (path=%s, mime=%s)", image_path, mime)
+                                break
+                    except Exception as e:
+                        logger.warning("[chat] failed to read image for LLM: %s", e)
+
             # ── log: incoming user turn ──────────────────────────────
             log_chat_request(
                 session_id=session.id,
@@ -99,7 +137,7 @@ async def chat_endpoint(request: Request, body: ChatRequest):
 
             # Record user message（带 sender，群聊防污染）
             user_name = getattr(config, "user_name", "用户") or "用户"
-            store.append("user", body.message, sender=user_name)
+            store.append("user", body.message, sender=user_name, image_url=body.image_url)
             await broadcast.push(session.id, {
                 "type": "new_message",
                 "role": "user",
@@ -107,6 +145,7 @@ async def chat_endpoint(request: Request, body: ChatRequest):
                 "timestamp": time.time(),
                 "client_id": body.client_id,
                 "sender": user_name,
+                "image_url": body.image_url,
             })
 
             # ── 双轨工具检测（消息保存后、LLM 调用前）───────────────────────────

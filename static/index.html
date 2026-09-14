@@ -3,14 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Shikigami Protocol</title>
+  <title>AI虚拟对话系统</title>
   <!-- 优先使用 static/icon.png（可将 assets/shikigami_protocol_icon.png 复制为 static/icon.png）；否则回退到 SVG 式 -->
   <link rel="icon" href="icon.png" type="image/png" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='25' x='16' text-anchor='middle' font-size='22' font-family='KaiTi, STKaiti, Kaiti SC, 楷体, serif'>式</text></svg>" type="image/svg+xml" />
   <!-- Restore theme before Vue mounts (prevents flash); migrate legacy id -->
   <script>(function(){var t=localStorage.getItem('theme');if(t===null){t='light';localStorage.setItem('theme',t);}if(t==='velvet_legacy'){t='velvet';localStorage.setItem('theme',t);}document.documentElement.setAttribute('data-theme',t);})();</script>
+  <!-- v-cloak 内联规则：慢网络下 styles.css 未下载完成时也立即生效，
+       防止 Vue 挂载前的 {{xxx}} 模板占位符闪现 -->
+  <style>[v-cloak]{display:none!important;}</style>
   <link rel="stylesheet" href="css/styles.css" />
   <link rel="stylesheet" href="css/settings.css" />
+  <!-- 网红聊天现代风覆盖层：必须在 styles/settings 之后加载 -->
+  <link rel="stylesheet" href="css/modern-ui.css" />
 
   <!-- P3: local libs (offline-capable, required for Electron) -->
   <script src="libs/vue.global.prod.js"></script>
@@ -32,7 +37,7 @@
   <aside class="sidebar" :class="{ open: sidebarOpen }">
     <div class="sidebar-header">
       <div class="app-logo" aria-hidden="true"><img src="icon.png" alt="" class="app-logo-img" onerror="this.style.display='none';this.nextElementSibling?.classList.add('use-fallback');" /><span class="app-logo-fallback">式</span></div>
-      <span class="app-name">Shikigami</span>
+      <span class="app-name">虚拟对话</span>
     </div>
 
     <div v-if="outOfSyncWithServer && !currentGroupId" class="sidebar-out-of-sync-hint">
@@ -557,6 +562,10 @@
             <span v-if="msg.sender" class="msg-sender">{{ msg.sender }}</span>
             <div class="bubble" :class="{ 'cmd-bubble': msg.is_command }">
               <span v-if="msg.is_command" class="cmd-badge">⌘</span>
+              <!-- 上传图片显示 -->
+              <div v-if="msg.image_url" class="bubble-image">
+                <img :src="msg.image_url" @click="openImageInNewTab(msg.image_url)" loading="lazy" />
+              </div>
               <!-- P5-B: collapsed content with fade mask -->
               <div v-html="renderMarkdown(msg.content)"
                    class="bubble-content"
@@ -638,31 +647,36 @@
       </button>
 
       <!-- 对话模式（连续 VAD + Barge-in） -->
-      <button v-if="toolbarConfig.convMode && toolbarConfig.convMode.enabled && sttConfig && sttConfig.enabled"
-              class="toolbar-btn conv-mode-btn"
-              :class="{ on: voiceConversationMode, recording: voiceConversationMode && voiceRecording, speaking: voiceConversationMode && isPlayingAudio }"
-              @click="toggleConversationMode"
-              :title="voiceConversationMode ? t('convModeOff') : t('convModeOn')">
-        <span class="conv-mode-icon">{{ voiceConversationMode ? (voiceRecording ? '🔴' : (isPlayingAudio ? '🔵' : '💬')) : '💬' }}</span>
-        <span v-if="voiceConversationMode" class="conv-mode-dot"
-              :class="{ 'dot-listening': !voiceRecording && !isPlayingAudio && !isStreaming,
-                        'dot-recording': voiceRecording,
-                        'dot-thinking': isStreaming,
-                        'dot-speaking': isPlayingAudio }"></span>
+<!--      <button v-if="toolbarConfig.convMode && toolbarConfig.convMode.enabled && sttConfig && sttConfig.enabled"-->
+<!--              class="toolbar-btn conv-mode-btn"-->
+<!--              :class="{ on: voiceConversationMode, recording: voiceConversationMode && voiceRecording, speaking: voiceConversationMode && isPlayingAudio }"-->
+<!--              @click="toggleConversationMode"-->
+<!--              :title="voiceConversationMode ? t('convModeOff') : t('convModeOn')">-->
+<!--        <span class="conv-mode-icon">{{ voiceConversationMode ? (voiceRecording ? '🔴' : (isPlayingAudio ? '🔵' : '💬')) : '💬' }}</span>-->
+<!--        <span v-if="voiceConversationMode" class="conv-mode-dot"-->
+<!--              :class="{ 'dot-listening': !voiceRecording && !isPlayingAudio && !isStreaming,-->
+<!--                        'dot-recording': voiceRecording,-->
+<!--                        'dot-thinking': isStreaming,-->
+<!--                        'dot-speaking': isPlayingAudio }"></span>-->
+<!--      </button>-->
+
+      <!-- 数字人视频聊天（独立页：形象可选，支持文本/图片，回复由数字人开口说出） -->
+      <button type="button" class="toolbar-btn dh-stage-btn"
+              @click="openDhStage" title="数字人视频聊天（新窗口）">
+        <span>🎭</span>
       </button>
 
       <!-- Screenshot — Electron only -->
-      <button v-if="isElectron && toolbarConfig.screenshot.enabled"
+      <!-- <button v-if="isElectron && toolbarConfig.screenshot.enabled"
               class="toolbar-btn screenshot-btn"
               @click="takeScreenshot" :title="t('screenshotTitle')">📷</button>
-
+     -->
       <!-- Screen share — browser path for ASE proactive screenshots -->
-      <button v-if="!isElectron && toolbarConfig.screenShare && toolbarConfig.screenShare.enabled"
-              class="toolbar-btn" :class="{ on: screenShareActive }"
+       <!-- <button       class="toolbar-btn" :class="{ on: screenShareActive }"
               @click="toggleScreenCapture"
               :title="screenShareActive ? t('screenShareOn') : t('screenShareOff')">
         {{ screenShareActive ? '🖥️' : '📺' }}
-      </button>
+      </button> -->
 
       <!-- Upload image — for chat VLM (same as screenshot, but from file) -->
       <label v-if="toolbarConfig.uploadImage && toolbarConfig.uploadImage.enabled"
@@ -672,7 +686,7 @@
       </label>
 
       <!-- 待办事项 button + panel（群聊下隐藏） -->
-      <div v-if="toolbarConfig.todos.enabled && !currentGroupId" class="toolbar-panel-wrap">
+      <!-- <div v-if="toolbarConfig.todos.enabled && !currentGroupId" class="toolbar-panel-wrap">
         <button class="toolbar-btn" :class="{ on: showTodosPanel }"
                 @click="toggleTodosPanel" :title="t('todosTitle')">📋</button>
         <div class="toolbar-panel" v-show="showTodosPanel">
@@ -694,10 +708,10 @@
             </div>
           </div>
         </div>
-      </div>
+      </div> -->
 
       <!-- 计时器 button + panel（群聊下隐藏） -->
-      <div v-if="toolbarConfig.timer.enabled && !currentGroupId" class="toolbar-panel-wrap">
+      <!-- <div v-if="toolbarConfig.timer.enabled && !currentGroupId" class="toolbar-panel-wrap">
         <button class="toolbar-btn" :class="{ on: showTimerPanel }"
                 @click="toggleTimerPanel" :title="t('timerTitle')">⏱</button>
         <div class="toolbar-panel" v-show="showTimerPanel">
@@ -720,10 +734,10 @@
             </div>
           </div>
         </div>
-      </div>
+      </div> -->
 
       <!-- Command 一览 button + panel -->
-      <div v-if="toolbarConfig.commands.enabled" class="toolbar-panel-wrap">
+      <!-- <div v-if="toolbarConfig.commands.enabled" class="toolbar-panel-wrap">
         <button class="toolbar-btn" :class="{ on: showCommandsPanel }"
                 @click="toggleCommandsPanel" :title="t('commandsTitle')">⌘</button>
         <div class="toolbar-panel tp-commands" v-show="showCommandsPanel">
@@ -803,10 +817,10 @@
 
           </div>
         </div>
-      </div>
+      </div> -->
 
       <!-- 工具栏配置 gear -->
-      <div class="toolbar-panel-wrap">
+      <!-- <div class="toolbar-panel-wrap">
         <button class="toolbar-btn toolbar-gear" :class="{ on: showToolbarConfig }"
                 @click="showToolbarConfig = !showToolbarConfig" :title="t('toolbarConfigTitle')">⚙</button>
         <div class="toolbar-panel tp-config" v-show="showToolbarConfig">
@@ -823,7 +837,7 @@
             </label>
           </div>
         </div>
-      </div>
+      </div> -->
 
     </div>
 
@@ -5241,5 +5255,8 @@
 <script src="js/api-paths.js"></script>
 <script src="js/settings.js"></script>
 <script src="js/app.js"></script>
+<!-- 数字人通话视图（DH_live 实时渲染器桥接）。必须在 app.js 之后加载：
+     Vue 挂载已完成，桥接层注入的顶栏按钮不会被模板覆盖。 -->
+<script src="dh_live/js/dh_live_bridge.js"></script>
 </body>
 </html>

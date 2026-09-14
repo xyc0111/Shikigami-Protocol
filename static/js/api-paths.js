@@ -27,6 +27,7 @@ window.API_PATHS = {
 
   chat: () => '/chat',
   vlm: () => '/vlm',
+  sessionUploadImage: (sid) => `/sessions/${encodeURIComponent(sid)}/upload_image`,
   events: (sessionId) => `/events/messages?session_id=${encodeURIComponent(sessionId)}`,
 
   profiles: () => '/profiles',

@@ -3,6 +3,13 @@
 // P3: Electron detection + screenshot IPC
 // P5: History loading + SSE broadcast sync (multi-client / LAN)
 
+// ─── 首页默认人格 ───
+// 打开首页时自动切换到这个人格（值为 sessions 列表里的会话 id，即 profiles/ 下的文件名去 .json）。
+// 置空 '' 表示不启用，跟随服务端上次使用的会话。
+// 临时覆盖（免改代码）：浏览器控制台执行 localStorage.setItem('defaultProfileId','example_xxia')，刷新生效；
+// 取消覆盖：localStorage.removeItem('defaultProfileId')。
+const DEFAULT_PROFILE_ID = 'example_xli';
+
 // 每次请求时按当前页 location 计算，避免缓存或加载顺序导致 HTTPS 页仍用 http/ws（内网穿透必用）
 function getBaseUrl() {
   const o = window.location.origin;
@@ -159,6 +166,9 @@ const App = {
       _audioUnlockRef: null,       // ref for removing unlock listener on unmount
       _currentAudioSource: null,   // P5: track playing source for interrupt
 
+      // 数字人通话：本条 TTS 连接是否走 dh 音频通道（16k/单声道/PCM16 WAV，驱动口型所需）
+      _dhAvatarOn: false,
+
       // TTS audio cache — key=message content, value=ArrayBuffer[] (raw chunks)
       // Only committed to _ttsCache on natural playback completion (not on interrupt).
       _ttsCache: {},
@@ -183,6 +193,7 @@ const App = {
       // VLM — pending screenshot captured by Electron IPC (base64 data URL)
       pendingScreenshot: null,
       pendingImageType: 'screenshot',  // 'screenshot' | 'upload' — 随 pendingScreenshot 一起设置，供 VLM 用不同 prompt
+      pendingImageDescription: '',  // 上传图片时后端返回的VLM描述
 
       // P4 — Status panel（群聊下用人格选择器选中的 profile 查状态）
       showStatusPanel: false,
@@ -388,11 +399,21 @@ const App = {
         }
       }
     } catch (_) {}
-    if (!restoredGroup && this.currentSessionId) {
-      await this.loadHistory(this.currentSessionId);
-      this.subscribeEvents(this.currentSessionId);
-      this.fetchStatus();
-      this._statusPollTimer = setInterval(() => this.fetchStatus(), 30000);
+    if (!restoredGroup) {
+      // 首页默认人格：配置了 DEFAULT_PROFILE_ID（或 localStorage.defaultProfileId）时，
+      // 打开页面自动切过去；switchSession 内部已完成 loadHistory/subscribe/fetchStatus
+      const defaultPid = (localStorage.getItem('defaultProfileId') || DEFAULT_PROFILE_ID || '').trim();
+      const wantSwitch = defaultPid
+        && defaultPid !== this.currentSessionId
+        && this.sessions.some(s => s.id === defaultPid);
+      if (wantSwitch) {
+        await this.switchSession(defaultPid);
+      } else if (this.currentSessionId) {
+        await this.loadHistory(this.currentSessionId);
+        this.subscribeEvents(this.currentSessionId);
+        this.fetchStatus();
+        this._statusPollTimer = setInterval(() => this.fetchStatus(), 30000);
+      }
     }
     this.statusText = this.t('statusReady');
     this.loadSystemConfig();
@@ -1232,41 +1253,66 @@ const App = {
       this.statusText = this.t('statusThinking');
       this._chatAbortController = new AbortController();
 
-      // Show user bubble immediately (sender 与后端一致，单聊为「用户」)
-      this.messages.push({ role: 'user', content: displayText, timestamp: this._now(), is_command: displayText.startsWith('/'), sender: '用户' });
-      await this.$nextTick();
-      this.scrollToBottom();
-
       // VLM: if screenshot/image is pending, describe it and append context to the message
       let messageToSend = displayText;
+      let imageUrl = '';
+
       if (this.pendingScreenshot) {
-        const screenshotB64 = this.pendingScreenshot.split(',')[1]; // strip data: prefix
+        // Check if it's an uploaded image (URL) or a screenshot (data URL)
+        const isUploadedImage = this.pendingImageType === 'upload' && !this.pendingScreenshot.startsWith('data:');
         const imageType = this.pendingImageType || 'screenshot';
-        this.pendingScreenshot = null;
-        this.pendingImageType = 'screenshot';
-        try {
-          uiLog('VLM', 'image pending, requesting description...', { imageType });
-          const vlmResp = await fetch(getBaseUrl() + API_PATHS.vlm(), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              session_id: this.currentSessionId,
-              image_b64: screenshotB64,
-              source: 'chat',
-              image_type: imageType,
-            }),
-          });
-          if (vlmResp.ok) {
-            const vlmData = await vlmResp.json();
-            if (vlmData.description) {
-              messageToSend = `${messageToSend}\n[当前屏幕：${vlmData.description}]`;
-              uiLog('VLM', 'description received', vlmData.description.slice(0, 80));
-            }
+
+        if (isUploadedImage) {
+          // Uploaded image: pendingScreenshot contains the image URL, description already fetched
+          imageUrl = this.pendingScreenshot;
+          if (this.pendingImageDescription) {
+            messageToSend = `${messageToSend}\n[图片描述：${this.pendingImageDescription}]`;
+            uiLog('VLM', 'using uploaded image description', this.pendingImageDescription.slice(0, 80));
           }
-        } catch (e) {
-          uiLog('VLM', 'description request failed', e.message);
+          this.pendingScreenshot = null;
+          this.pendingImageType = 'screenshot';
+          this.pendingImageDescription = '';
+        } else {
+          // Screenshot: extract base64 and call VLM
+          const screenshotB64 = this.pendingScreenshot.split(',')[1]; // strip data: prefix
+          this.pendingScreenshot = null;
+          this.pendingImageType = 'screenshot';
+          try {
+            uiLog('VLM', 'screenshot pending, requesting description...', { imageType });
+            const vlmResp = await fetch(getBaseUrl() + API_PATHS.vlm(), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                session_id: this.currentSessionId,
+                image_b64: screenshotB64,
+                source: 'chat',
+                image_type: imageType,
+              }),
+            });
+            if (vlmResp.ok) {
+              const vlmData = await vlmResp.json();
+              if (vlmData.description) {
+                messageToSend = `${messageToSend}\n[当前屏幕：${vlmData.description}]`;
+                uiLog('VLM', 'description received', vlmData.description.slice(0, 80));
+              }
+            }
+          } catch (e) {
+            uiLog('VLM', 'description request failed', e.message);
+          }
         }
       }
+
+      // Show user bubble immediately (sender 与后端一致，单聊为「用户」)
+      this.messages.push({
+        role: 'user',
+        content: displayText,
+        timestamp: this._now(),
+        is_command: displayText.startsWith('/'),
+        sender: '用户',
+        image_url: imageUrl
+      });
+      await this.$nextTick();
+      this.scrollToBottom();
 
       try {
         const response = await fetch(getBaseUrl() + API_PATHS.chat(), {
@@ -1275,6 +1321,7 @@ const App = {
           body: JSON.stringify({
             message: messageToSend,
             client_id: CLIENT_ID,
+            image_url: imageUrl,
           }),
           signal: this._chatAbortController.signal,
         });
@@ -1367,31 +1414,50 @@ const App = {
       this.groupChatStreamingSender = '';
       this._groupChatAbortController = new AbortController();
       this.statusText = this.t('statusGroupReplying');
-      this.messages.push({ role: 'user', content: displayText, timestamp: this._now(), sender: userSender });
-      await this.$nextTick();
-      this.scrollToBottom();
 
       let messageToSend = displayText;
+      let imageUrl = '';
+
       if (hasImage && this.pendingScreenshot) {
-        const screenshotB64 = this.pendingScreenshot.split(',')[1];
-        this.pendingScreenshot = null;
-        try {
-          const vlmResp = await fetch(getBaseUrl() + API_PATHS.vlm(), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              session_id: this.currentSessionId || '',
-              image_b64: screenshotB64,
-              source: 'chat',
-              image_type: this.pendingImageType || 'screenshot',
-            }),
-          });
-          if (vlmResp.ok) {
-            const vlmData = await vlmResp.json();
-            if (vlmData.description) messageToSend = `${messageToSend}\n[当前屏幕：${vlmData.description}]`;
+        // Check if it's an uploaded image (URL) or a screenshot (data URL)
+        const isUploadedImage = this.pendingImageType === 'upload' && !this.pendingScreenshot.startsWith('data:');
+        const imageType = this.pendingImageType || 'screenshot';
+
+        if (isUploadedImage) {
+          // Uploaded image: pendingScreenshot contains the image URL, description already fetched
+          imageUrl = this.pendingScreenshot;
+          if (this.pendingImageDescription) {
+            messageToSend = `${messageToSend}\n[图片描述：${this.pendingImageDescription}]`;
           }
-        } catch (e) { console.warn('[group] VLM failed', e); }
+          this.pendingScreenshot = null;
+          this.pendingImageType = 'screenshot';
+          this.pendingImageDescription = '';
+        } else {
+          // Screenshot: extract base64 and call VLM
+          const screenshotB64 = this.pendingScreenshot.split(',')[1];
+          this.pendingScreenshot = null;
+          try {
+            const vlmResp = await fetch(getBaseUrl() + API_PATHS.vlm(), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                session_id: this.currentSessionId || '',
+                image_b64: screenshotB64,
+                source: 'chat',
+                image_type: imageType,
+              }),
+            });
+            if (vlmResp.ok) {
+              const vlmData = await vlmResp.json();
+              if (vlmData.description) messageToSend = `${messageToSend}\n[当前屏幕：${vlmData.description}]`;
+            }
+          } catch (e) { console.warn('[group] VLM failed', e); }
+        }
       }
+
+      this.messages.push({ role: 'user', content: displayText, timestamp: this._now(), sender: userSender, image_url: imageUrl });
+      await this.$nextTick();
+      this.scrollToBottom();
 
       try {
         const response = await fetch(getBaseUrl() + API_PATHS.groupChat(this.currentGroupId), {
@@ -1660,7 +1726,11 @@ const App = {
       }
 
       try {
-        this._ttsWs = new WebSocket(`${getWsUrl()}/ws/tts`);
+        // 数字人通话视图打开且渲染器就绪时，服务端改为下发 16k/单声道/PCM16 WAV
+        const _dh = window.DHLiveAvatar;
+        this._dhAvatarOn = !!(_dh && _dh.isOpen && _dh.isOpen() && _dh.isReady && _dh.isReady());
+        const _ttsPath = this._dhAvatarOn ? '/ws/tts?format=dh' : '/ws/tts';
+        this._ttsWs = new WebSocket(`${getWsUrl()}${_ttsPath}`);
         this._ttsWs.binaryType = 'arraybuffer';
 
         this._ttsWs.onopen = () => {
@@ -1862,6 +1932,11 @@ const App = {
         return;
       }
       await this._startVoiceRecording();
+    },
+
+    /** 数字人视频聊天独立页（static/dh_live/stage.html）：新窗口打开，形象可选、支持文本/图片。 */
+    openDhStage() {
+      window.open('dh_live/stage.html', '_blank');
     },
 
     async _startVoiceRecording() {
@@ -2203,7 +2278,26 @@ const App = {
         const buffer = await this._audioCtx.decodeAudioData(data.slice(0));
         const source = this._audioCtx.createBufferSource();
         source.buffer = buffer;
-        source.connect(this._audioCtx.destination);
+
+        // ── 数字人：先喂 wasm 驱动口型，再起播 ───────────────────────────
+        // 顺序不能反，也不能并发推送：wasm 内部按到达顺序消费音频缓冲，
+        // 乱序或提前起播会让口型与声音脱节（DH 自己的 dialog_realtime.js 也是这个写法）。
+        // 按整句推送，与 DH 上游行为一致；bridge 另提供 pushPaced（按播放节奏切片）
+        // 供口型精度需要微调时切换，实测打断场景下两者表现一致，故默认不用。
+        const _dh = window.DHLiveAvatar;
+        if (this._dhAvatarOn && _dh && _dh.isReady && _dh.isReady()) {
+          const _wasm = new Uint8Array(data);
+          if (window.__DH_PUSH_PACED__ && typeof _dh.pushPaced === 'function') {
+            _dh.pushPaced(_wasm, buffer.duration);
+          } else if (typeof _dh.pushWav === 'function') {
+            _dh.pushWav(_wasm);
+          }
+        }
+
+        // 通话视图打开时把音频接到 GainNode：静音只影响出声，播放时钟照走，
+        // 口型不会因为静音而停摆。
+        const _dhDest = (_dh && _dh.isOpen && _dh.isOpen()) ? _dh.audioDestination(this._audioCtx) : null;
+        source.connect(_dhDest || this._audioCtx.destination);
         this._currentAudioSource = source;
         source.onended = () => {
           this._currentAudioSource = null;
@@ -2254,17 +2348,34 @@ const App = {
     onUploadImage(event) {
       const file = event.target.files && event.target.files[0];
       if (!file || !file.type.startsWith('image/')) return;
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const dataUrl = e.target && e.target.result;
-        if (dataUrl) {
-          this.pendingScreenshot = dataUrl;
-          this.pendingImageType = 'upload';
-          this.statusText = this.locale === 'en' ? 'Image attached, will analyze on send' : '已附加图片，发送消息时将一并分析';
-          uiLog('VLM', 'image uploaded', { type: file.type });
-        }
-      };
-      reader.readAsDataURL(file);
+
+      // Upload to backend
+      this.statusText = this.locale === 'en' ? 'Uploading image...' : '正在上传图片...';
+      const formData = new FormData();
+      formData.append('file', file);
+
+      fetch(getBaseUrl() + API_PATHS.sessionUploadImage(this.currentSessionId), {
+        method: 'POST',
+        body: formData,
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (data.ok && data.image_url) {
+            this.pendingScreenshot = data.image_url;
+            this.pendingImageType = 'upload';
+            this.pendingImageDescription = '';  // No separate VLM call, image will be sent with main chat
+            this.statusText = this.locale === 'en' ? 'Image uploaded, will analyze on send' : '图片已上传，发送消息时将一并分析';
+            uiLog('VLM', 'image uploaded', { type: file.type, url: data.image_url });
+          } else {
+            this.statusText = this.locale === 'en' ? 'Upload failed' : '上传失败';
+            uiLog('VLM', 'image upload failed', data.error);
+          }
+        })
+        .catch(err => {
+          this.statusText = this.locale === 'en' ? 'Upload failed' : '上传失败';
+          uiLog('VLM', 'image upload error', err.message);
+        });
+
       event.target.value = '';
     },
 
@@ -2297,6 +2408,10 @@ const App = {
         document.execCommand('copy');
         document.body.removeChild(ta);
       }
+    },
+
+    openImageInNewTab(url) {
+      window.open(url, '_blank');
     },
 
     renderMarkdown(text) {
@@ -2889,4 +3004,5 @@ const App = {
 };
 
 const vueApp = Vue.createApp(App);
-vueApp.mount('#app');
+// 暴露实例：数字人桥接层（dh_live/js/dh_live_bridge.js）需要读开关状态并触发 TTS 重连
+window.__shikigamiApp = vueApp.mount('#app');

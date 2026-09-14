@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN" data-page-node-id="twmm17cozBFj1Xzne9b18g">
+<head data-page-node-id="8uyv5ovG9cvbxRVPzvRfA4">
+  <meta charset="utf-8" data-page-node-id="9RoSTGBoQ85EnUPNHOZ6y5" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="F26XGLkNfh3tzD8akedjyR" />
+  <title>DH_live 数字人渲染器 · 冒烟测试</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0d12; color: #cfd6e4;
+      font: 13px/1.7 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    #report { position: fixed; left: 12px; bottom: 12px; z-index: 99999;
+      background: rgba(8,10,15,.94); border: 1px solid rgba(255,255,255,.14);
+      border-radius: 10px; padding: 12px 14px; max-width: 52vw; white-space: pre-wrap;
+      font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.65; }
+    #bar { position: fixed; left: 12px; top: 12px; z-index: 99999; display: flex; gap: 8px; }
+    #bar button { appearance: none; border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.08); color: #e8edf7; border-radius: 8px;
+      padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  </style>
+</head>
+<body data-page-node-id="kUuyHrDcl5ZBW2evNa2GBE">
+  <!-- 独立冒烟页：不依赖 Shikigami 的 Vue 应用，单独验证
+       wasm 加载 / WebGL2 / 帧循环 / 口型驱动 是否可用。
+       用法： /dh_live/avatar.html?avatar=avatars/dh_female_01 -->
+  <div id="bar" data-page-node-id="xuY5kYAI6F56mHGcJni84Y">
+    <button id="btn-lip" data-page-node-id="MFyBupZiIIerccoIQ9WCly">重放测试音频（口型）</button>
+    <button id="btn-interrupt" data-page-node-id="GMg8QRrLEM00FrI1w2WZOA">打断</button>
+  </div>
+  <div id="report" data-page-node-id="eTviSnh5PrRiS9hCBys6BF">初始化中…</div>
+
+  <script src="js/dh_live_bridge.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const avatarId = params.get('avatar') || 'avatars/dh_male_01';
+    const lines = [];
+    const report = document.getElementById('report');
+    function log(label, ok, extra) {
+      lines.push((ok ? '✓ ' : '✗ ') + label + (extra ? '  ' + extra : ''));
+      report.innerHTML = lines.join('\n');
+    }
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    /* 直接读 wasm 里的 blend shape（口型权重）——
+       MiniLive2.js 顶层 let bsPtr 指向 12 个 float，_updateBlendShape 每帧刷新。
+       这是判断「嘴到底动没动」最直接的证据，比看截图靠谱。 */
+    function blendShapes() {
+      try {
+        return Array.from(new Float32Array(Module.HEAPU8.buffer, bsPtr, 12));
+      } catch (e) { return null; }
+    }
+    const bsEnergy = a => a ? a.reduce((s, v) => s + Math.abs(v), 0) : -1;
+    const fmt = a => a ? '[' + a.map(v => v.toFixed(3)).join(', ') + ']' : '(读不到)';
+
+    async function feedWav(name) {
+      const buf = await (await fetch('common/' + name)).arrayBuffer();
+      return DHLiveAvatar.pushWav(new Uint8Array(buf));
+    }
+    const feedTestWav = () => feedWav('test.wav');
+
+    (async () => {
+      log('navigator.userAgent', true, navigator.userAgent.slice(0, 80));
+      log('WebGL2 可用', !!document.createElement('canvas').getContext('webgl2'));
+      log('WebCodecs (VideoDecoder)', typeof window.VideoDecoder === 'function');
+      log('baseDir', true, DHLiveAvatar.baseDir);
+
+      DHLiveAvatar.on('error', e => log('渲染器初始化', false, String(e && e.message || e)));
+      const ready = new Promise(res => DHLiveAvatar.on('ready', res));
+      await DHLiveAvatar.open({ avatarId });
+      await ready;
+
+      log('渲染器初始化', true);
+      const cv = document.getElementById('canvas_video');
+      log('canvas_video 尺寸', !!cv && cv.width > 0, cv ? cv.width + '×' + cv.height : '—');
+      log('Module 导出齐全',
+        typeof Module._setAudioBuffer === 'function' && typeof Module._clearAudio === 'function');
+
+      // ── 帧循环 ────────────────────────────────────────────────
+      const ctx = cv.getContext('2d');
+      const sig = () => {
+        const d = ctx.getImageData(Math.floor(cv.width / 2), Math.floor(cv.height / 2), 1, 1).data;
+        return d[0] + ',' + d[1] + ',' + d[2];
+      };
+      const a = sig(); await sleep(500); const b = sig();
+      log('帧循环在推进', a !== b, 'a=' + a + ' b=' + b);
+
+      /* 判读口径 —— 用「窗口极差」而不是均值：
+         bsPtr 上的 Σ|bs| 混了两份信号：
+           (a) 当前 idle 视频帧的姿态变形，随 133 帧循环起伏，均值会缓慢漂移（~18~30）；
+           (b) 音频驱动的口型开合。
+         均值因此不是稳定判据；但「窗口内极差」很稳：
+           嘴不动 → 极差 ~2 以内；嘴在动 → 极差 20 以上。差一个数量级。 */
+      async function win(n, gapMs) {
+        const out = [];
+        for (let i = 0; i < n; i++) { out.push(bsEnergy(blendShapes())); await sleep(gapMs); }
+        return {
+          vals: out,
+          mean: out.reduce((s, v) => s + v, 0) / out.length,
+          spread: Math.max(...out) - Math.min(...out),
+        };
+      }
+      const loadWav = async name =>
+        new Uint8Array(await (await fetch('common/' + name)).arrayBuffer());
+      const testWav = await loadWav('test.wav');
+      const silWav = await loadWav('silence.wav');
+      const DUR = 2.6;
+      const reset = async () => { DHLiveAvatar.interrupt(); await sleep(500); };
+
+      // ① 闭合基线：喂等长静音 → 口型不动
+      await reset();
+      DHLiveAvatar.pushPaced(silWav, DUR);
+      await sleep(300);
+      const closed = await win(10, 80);
+      log('静音输入：口型不动', closed.spread < 8,
+        '极差=' + closed.spread.toFixed(2) + '  均值=' + closed.mean.toFixed(2));
+
+      // ② 说话：真音频把口型驱动起来 —— 本方案的核心可行性结论
+      await reset();
+      DHLiveAvatar.pushPaced(testWav, DUR);
+      await sleep(300);
+      const speaking = await win(10, 80);
+      log('语音输入：口型被驱动', speaking.spread > closed.spread * 3 && speaking.spread > 15,
+        '极差 ' + closed.spread.toFixed(2) + ' → ' + speaking.spread.toFixed(2) +
+        '  (' + (speaking.spread / Math.max(closed.spread, 0.01)).toFixed(1) + '×)  均值=' + speaking.mean.toFixed(2));
+
+      // ③ 打断：切片推送 vs 整段推送，1.0s 处打断，1.6s 处采样
+      await reset();
+      DHLiveAvatar.pushPaced(testWav, DUR);
+      await sleep(1000); DHLiveAvatar.interrupt(); await sleep(600);
+      const pacedCut = await win(10, 80);
+
+      await reset();
+      DHLiveAvatar.pushWav(testWav);
+      await sleep(1000); DHLiveAvatar.interrupt(); await sleep(600);
+      const wholeCut = await win(10, 80);
+
+      log('打断后口型停住（切片推送）', pacedCut.spread < speaking.spread * 0.5,
+        '极差：说话 ' + speaking.spread.toFixed(2) + ' → 打断后 ' + pacedCut.spread.toFixed(2) +
+        '（静音基准 ' + closed.spread.toFixed(2) + '）');
+      // 记录用：实测整段推送也能被 _clearAudio() 打断（早先用「均值」判读时曾误判为不能，
+      // 换成极差判据后真相反转）。所以打断不构成「必须切片推送」的理由。
+      log('整段推送同样能被打断（信息性）', true,
+        '极差：整段推送 ' + wholeCut.spread.toFixed(2) + ' / 切片推送 ' + pacedCut.spread.toFixed(2));
+
+      // ④ 切片器自检：每片必须是合法 WAV 且拼起来无损
+      await (async function sliceSelfTest() {
+        const N = 15;
+        const dataChunk = b => {
+          let off = 12;
+          while (b && off + 8 <= b.length) {
+            const id = String.fromCharCode(b[off], b[off + 1], b[off + 2], b[off + 3]);
+            const sz = (b[off + 4] | (b[off + 5] << 8) | (b[off + 6] << 16) | (b[off + 7] << 24)) >>> 0;
+            if (id === 'data') return { off, sz };
+            off += 8 + sz + (sz & 1);
+          }
+          return null;
+        };
+        let joined = 0, bad = 0, detail = '';
+        for (let i = 0; i < N; i++) {
+          const p = DHLiveAvatar.sliceWav(testWav, i, N);
+          const m = dataChunk(p);
+          const magic = p && p[0] === 0x52 && p[1] === 0x49 && p[8] === 0x57 && p[9] === 0x41;
+          const riff = p ? (p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24)) >>> 0 : -1;
+          const ok = magic && m && riff === p.length - 8 && m.sz === p.length - m.off - 8;
+          if (!ok) { bad++; if (!detail) detail = '第' + i + '片不合法'; }
+          joined += m ? m.sz : 0;
+        }
+        const total = dataChunk(testWav);
+        log('切片器自检（' + N + ' 片合法且无损）', bad === 0 && Math.abs(joined - total.sz) <= N * 2,
+          '非法片 ' + bad + '，采样字节 ' + joined + ' / ' + total.sz + (detail ? '  ' + detail : ''));
+      })();
+
+      // ⑤ 内置静音尾可用性（打断后补的静音，必须能被 pushWav 接受）
+      const sil = DHLiveAvatar.silenceWav(DHLiveAvatar.interruptSilenceMs);
+      log('内置静音尾可用', DHLiveAvatar.pushWav(sil),
+        sil.length + 'B / ' + DHLiveAvatar.interruptSilenceMs + 'ms');
+
+      try { isPaused = true; } catch (e) {}
+      window.__SMOKE__ = { ok: lines.every(l => l.startsWith('✓')), lines: lines.slice() };
+      document.title = 'SMOKE_DONE';
+    })();
+
+    document.getElementById('btn-lip').addEventListener('click', async () => {
+      log('手动 pushWav', await feedTestWav());
+    });
+    document.getElementById('btn-interrupt').addEventListener('click', () => {
+      log('手动 interrupt', DHLiveAvatar.interrupt());
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "_comment": "DH_live 实时数字人形象清单。id 为 static/dh_live/ 下的相对目录，profile 通过 dh_avatar_id 引用。形象与音色 1:1 绑定，请确保 profile 的 TTS 音色与该形象匹配。",
+  "renderer": {
+    "wasm": "DHLiveMini.wasm",
+    "entry_scripts": ["js/pako.min.js", "js/DHLiveMini.js", "js/MiniLive2.js", "js/qtloader.js"],
+    "texture": "common/bs_texture_halfFace.png",
+    "background_video": "background/bg.mp4",
+    "audio_format": "16000Hz / mono / PCM16 WAV"
+  },
+  "avatars": [
+    { "id": "avatars/dh_male_01",   "name": "男性一", "video": "01.mp4", "data": "combined_data.json.gz" },
+    { "id": "avatars/dh_female_01", "name": "女性一", "video": "01.mp4", "data": "combined_data.json.gz" },
+    { "id": "avatars/dh_avatar_03", "name": "形象三", "video": "01.mp4", "data": "combined_data.json.gz" },
+    { "id": "avatars/dh_avatar_05", "name": "形象五", "video": "01.mp4", "data": "combined_data.json.gz" }
+  ]
+}

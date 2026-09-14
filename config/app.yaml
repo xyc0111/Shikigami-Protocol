@@ -2,10 +2,10 @@
 port: 7788
 host: "0.0.0.0"
 log_level: "debug"
-default_llm: "Gemini"
+default_llm: "ollama_local"
 default_tts: "kokoro"
 max_history_turns: 60
-user_name: "用户"
+user_name: "熊严超"
 
 llm_presets:
   Gemini:
@@ -20,9 +20,9 @@ llm_presets:
     - frequency_penalty
   ollama_local:
     type: openai_compat
-    api_key: ''
-    base_url: http://localhost:11434/v1
-    model: qwen2.5:14b
+    api_key: 'sk-2e8c04648376f0d6-0631e6-03c0cf17'
+    base_url: http://192.168.10.8:20128/v1
+    model: auto
     temperature: 0.7
     top_p: 0.7
     presence_penalty: 0.05
@@ -66,7 +66,10 @@ tts:
     repetition_penalty: 1.05
 
   kokoro:
-    voice: 'em_alex'
+    host: "host.docker.internal" # 关键修改：指向宿主机网络
+    # host: "192.168.1.100"      # 或者填写你电脑的具体局域网 IP
+    port: 8880
+    voice: 'zf_xiaoxiao'
     lang: zh
     speed: 1.0
     auto_detect_lang: true
@@ -214,8 +217,8 @@ ase:
     check_in_probability: 0.5
 
 vlm:
-  enabled: false
-  model_preset: "Gemini"
+  enabled: true
+  model_preset: "__active__"
   for_chat: true
   for_ase: true
   ase_wait_seconds: 3

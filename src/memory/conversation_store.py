@@ -14,6 +14,7 @@ class Message:
     content: str
     timestamp: float = 0.0
     sender: str = ""  # 发言者标识：用户名或人格 display_name，群聊防污染用
+    image_url: str = ""  # 上传图片的URL路径（可选）
 
     def __post_init__(self):
         if not self.timestamp:
@@ -66,7 +67,8 @@ class ConversationStore:
                 role      TEXT    NOT NULL,
                 content   TEXT    NOT NULL,
                 timestamp REAL    NOT NULL,
-                sender    TEXT    NOT NULL DEFAULT ''
+                sender    TEXT    NOT NULL DEFAULT '',
+                image_url TEXT    NOT NULL DEFAULT ''
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON messages(timestamp)")
@@ -80,8 +82,12 @@ class ConversationStore:
                 conn.execute("ALTER TABLE messages ADD COLUMN sender TEXT NOT NULL DEFAULT ''")
                 conn.commit()
                 logger.info("[ConversationStore] migrated schema: added sender column (%s)", self._db_path)
+            if "image_url" not in columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN image_url TEXT NOT NULL DEFAULT ''")
+                conn.commit()
+                logger.info("[ConversationStore] migrated schema: added image_url column (%s)", self._db_path)
         except Exception as e:
-            logger.warning("[ConversationStore] sender column migration failed: %s", e)
+            logger.warning("[ConversationStore] schema migration failed: %s", e)
 
         # Auto-migrate from JSON if .bak doesn't already exist
         json_path = os.path.join(self.storage_root, "chat_records.json")
@@ -100,7 +106,7 @@ class ConversationStore:
             rows = [
                 (m.get("role", ""), m.get("content", ""),
                  float(m.get("timestamp") or time.time()),
-                 m.get("sender", "") or ("用户" if m.get("role") == "user" else ""))
+                 m.get("sender", "") or ("我" if m.get("role") == "user" else ""))
                 for m in data if m.get("role") and m.get("content")
             ]
             with conn:
@@ -137,12 +143,12 @@ class ConversationStore:
 
     # ── Write operations ─────────────────────────────────────────────────────
 
-    def append(self, role: str, content: str, sender: str = ""):
+    def append(self, role: str, content: str, sender: str = "", image_url: str = ""):
         ts = time.time()
         with self._conn:
             self._conn.execute(
-                "INSERT INTO messages (role, content, timestamp, sender) VALUES (?, ?, ?, ?)",
-                (role, content, ts, (sender or "").strip())
+                "INSERT INTO messages (role, content, timestamp, sender, image_url) VALUES (?, ?, ?, ?, ?)",
+                (role, content, ts, (sender or "").strip(), image_url or "")
             )
         if self.max_turns > 0:
             limit = self.max_turns * 2
@@ -174,34 +180,34 @@ class ConversationStore:
         with self._conn:
             self._conn.execute("DELETE FROM messages")
             self._conn.executemany(
-                "INSERT INTO messages (role, content, timestamp, sender) VALUES (?, ?, ?, ?)",
-                [(m.role, m.content, m.timestamp, getattr(m, "sender", "") or "") for m in messages]
+                "INSERT INTO messages (role, content, timestamp, sender, image_url) VALUES (?, ?, ?, ?, ?)",
+                [(m.role, m.content, m.timestamp, getattr(m, "sender", "") or "", getattr(m, "image_url", "") or "") for m in messages]
             )
 
     # ── Read operations ──────────────────────────────────────────────────────
 
     def get_recent(self, n_turns: int = 20) -> List[Dict[str, str]]:
-        """Return the last n_turns rounds as [{role, content, sender?}, ...] for the LLM.
+        """Return the last n_turns rounds as [{role, content, sender?, image_url?}, ...] for the LLM.
 
         Excludes messages with timestamp < context_since_ts so that a short-term
         memory reset is respected without deleting visible chat history.
         """
         since = self._context_since_ts
         rows = self._conn.execute("""
-            SELECT role, content, sender FROM messages
+            SELECT role, content, sender, image_url FROM messages
             WHERE role IN ('user', 'assistant')
               AND (? = 0 OR timestamp >= ?)
             ORDER BY timestamp DESC
             LIMIT ?
         """, (since, since, n_turns * 2)).fetchall()
         rows.reverse()
-        return [{"role": r[0], "content": r[1], "sender": (r[2] or "") if len(r) > 2 else ""} for r in rows]
+        return [{"role": r[0], "content": r[1], "sender": (r[2] or "") if len(r) > 2 else "", "image_url": (r[3] or "") if len(r) > 3 else ""} for r in rows]
 
     def get_recent_with_ts(self, n_turns: int = 20) -> List[Dict]:
         """Like get_recent but each dict includes 'timestamp' for merging with group messages."""
         since = self._context_since_ts
         rows = self._conn.execute("""
-            SELECT role, content, sender, timestamp FROM messages
+            SELECT role, content, sender, timestamp, image_url FROM messages
             WHERE role IN ('user', 'assistant')
               AND (? = 0 OR timestamp >= ?)
             ORDER BY timestamp DESC
@@ -209,7 +215,7 @@ class ConversationStore:
         """, (since, since, n_turns * 2)).fetchall()
         rows.reverse()
         return [
-            {"role": r[0], "content": r[1], "sender": (r[2] or "") if len(r) > 2 else "", "timestamp": r[3] if len(r) > 3 else 0.0}
+            {"role": r[0], "content": r[1], "sender": (r[2] or "") if len(r) > 2 else "", "timestamp": r[3] if len(r) > 3 else 0.0, "image_url": (r[4] or "") if len(r) > 4 else ""}
             for r in rows
         ]
 
@@ -219,52 +225,52 @@ class ConversationStore:
             return []
         s = sender.strip()
         rows = self._conn.execute("""
-            SELECT role, content, sender FROM messages
+            SELECT role, content, sender, image_url FROM messages
             WHERE sender = ? AND role IN ('user', 'assistant')
             ORDER BY timestamp DESC LIMIT ?
         """, (s, n)).fetchall()
         rows.reverse()
-        return [{"role": r[0], "content": r[1], "sender": (r[2] or "") if len(r) > 2 else ""} for r in rows]
+        return [{"role": r[0], "content": r[1], "sender": (r[2] or "") if len(r) > 2 else "", "image_url": (r[3] or "") if len(r) > 3 else ""} for r in rows]
 
     def get_recent_since(self, since_ts: float, limit: int = 50) -> List[Dict[str, str]]:
         """Return up to `limit` messages with timestamp >= since_ts (all senders), chronological order.
         Used for 单聊合并群近期：merged_history 在短期上下文时间窗内取群消息。
         """
         items = self.get_recent_since_with_ts(since_ts, limit)
-        return [{"role": m["role"], "content": m["content"], "sender": m.get("sender", "")} for m in items]
+        return [{"role": m["role"], "content": m["content"], "sender": m.get("sender", ""), "image_url": m.get("image_url", "")} for m in items]
 
     def get_recent_since_with_ts(self, since_ts: float, limit: int = 50) -> List[Dict]:
         """Like get_recent_since but each dict includes 'timestamp' for merging (单聊+群聊合并)."""
         if limit <= 0:
             return []
         rows = self._conn.execute("""
-            SELECT role, content, sender, timestamp FROM messages
+            SELECT role, content, sender, timestamp, image_url FROM messages
             WHERE role IN ('user', 'assistant') AND timestamp >= ?
             ORDER BY timestamp DESC LIMIT ?
         """, (max(0.0, since_ts), max(1, limit))).fetchall()
         rows.reverse()
         return [
-            {"role": r[0], "content": r[1], "sender": (r[2] or "") if len(r) > 2 else "", "timestamp": r[3] if len(r) > 3 else 0.0}
+            {"role": r[0], "content": r[1], "sender": (r[2] or "") if len(r) > 2 else "", "timestamp": r[3] if len(r) > 3 else 0.0, "image_url": (r[4] or "") if len(r) > 4 else ""}
             for r in rows
         ]
 
     def get_all(self) -> List[Message]:
         """Return all stored messages (for history API / client sync)."""
         rows = self._conn.execute(
-            "SELECT role, content, timestamp, sender FROM messages ORDER BY timestamp"
+            "SELECT role, content, timestamp, sender, image_url FROM messages ORDER BY timestamp"
         ).fetchall()
         return [
-            Message(role=r[0], content=r[1], timestamp=r[2], sender=(r[3] or "") if len(r) > 3 else "")
+            Message(role=r[0], content=r[1], timestamp=r[2], sender=(r[3] or "") if len(r) > 3 else "", image_url=(r[4] or "") if len(r) > 4 else "")
             for r in rows
         ]
 
     def get_all_with_id(self) -> List[Dict]:
-        """Return all messages as dicts with id, role, content, timestamp, sender (for paginated history)."""
+        """Return all messages as dicts with id, role, content, timestamp, sender, image_url (for paginated history)."""
         rows = self._conn.execute(
-            "SELECT id, role, content, timestamp, sender FROM messages ORDER BY timestamp"
+            "SELECT id, role, content, timestamp, sender, image_url FROM messages ORDER BY timestamp"
         ).fetchall()
         return [
-            {"id": r[0], "role": r[1], "content": r[2], "timestamp": r[3], "sender": (r[4] or "") if len(r) > 4 else ""}
+            {"id": r[0], "role": r[1], "content": r[2], "timestamp": r[3], "sender": (r[4] or "") if len(r) > 4 else "", "image_url": (r[5] or "") if len(r) > 5 else ""}
             for r in rows
         ]
 
@@ -272,18 +278,18 @@ class ConversationStore:
                         offset: int = 0) -> List[Dict]:
         """Search messages by content (LIKE), newest first, paginated.
 
-        Returns list of dicts with keys: id, role, content, timestamp.
+        Returns list of dicts with keys: id, role, content, timestamp, sender, image_url.
         Empty q returns all messages (newest first).
         """
         pattern = f"%{q}%" if q else "%"
         rows = self._conn.execute("""
-            SELECT id, role, content, timestamp, sender FROM messages
+            SELECT id, role, content, timestamp, sender, image_url FROM messages
             WHERE content LIKE ?
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?
         """, (pattern, limit, offset)).fetchall()
         return [
-            {"id": r[0], "role": r[1], "content": r[2], "timestamp": r[3], "sender": (r[4] or "") if len(r) > 4 else ""}
+            {"id": r[0], "role": r[1], "content": r[2], "timestamp": r[3], "sender": (r[4] or "") if len(r) > 4 else "", "image_url": (r[5] or "") if len(r) > 5 else ""}
             for r in rows
         ]
 

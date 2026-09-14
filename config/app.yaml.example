@@ -13,7 +13,7 @@ default_llm: "Gemini"
 default_tts: "edge_tts"
 
 max_history_turns: 60
-user_name: "用户"
+user_name: "我"
 
 # ── LLM Presets ──────────────────────────────────────────────────────────────
 # All providers are OpenAI-compatible.

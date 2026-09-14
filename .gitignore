@@ -33,9 +33,9 @@ Voices/
 # ── 人格目录：仅保留仓库内几个示例 JSON；本地运行产生的子目录 / DB 一律忽略 ──
 profiles/*/
 profiles/*.json
-!profiles/example_luna.json
+!profiles/example_xli.json
 !profiles/example_luna_en.json
-!profiles/example_mochi.json
+!profiles/example_xxia.json
 !profiles/example_mochi_en.json
 
 # ── SQLite / Chroma / 向量库（可能在 profiles 下）────────────────────────────

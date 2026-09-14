@@ -735,6 +735,10 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
+      // 数字人通话：口型游标由 requestAnimationFrame 帧数推进（MiniLive2.js 节流到 25fps），
+      // 音频是 WebAudio 实时播放——两套独立时钟。窗口最小化/被遮挡时 Chromium 默认把 rAF
+      // 节流到 ~1fps，数字人立刻对不上嘴，所以这里必须关掉后台节流。
+      backgroundThrottling: false,
     },
   });
 
@@ -744,6 +748,25 @@ function createWindow() {
   // Handle target="_blank" links: open docs-viewer pages in a proper child window.
   // Any other same-origin navigation is allowed in-place; deny everything else.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    // 数字人视频聊天独立页（🎭 按钮）：子窗口需关后台节流，否则最小化后口型失步
+    if (url.includes('/dh_live/stage.html')) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 1180,
+          height: 820,
+          autoHideMenuBar: true,
+          icon: getAppIcon(),
+          title: '数字人视频聊天',
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+            backgroundThrottling: false,
+          },
+        },
+      };
+    }
     if (url.includes('/docs-viewer.html')) {
       return {
         action: 'allow',

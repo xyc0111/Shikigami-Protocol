@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import mimetypes
 import os
 import sys
 import warnings
@@ -50,6 +51,13 @@ if not getattr(sys, 'frozen', False):
     _root = os.path.dirname(os.path.abspath(__file__))
     if _root not in sys.path:
         sys.path.insert(0, _root)
+
+# ── MIME 注册 ────────────────────────────────────────────────────────────────
+# DH_live 实时数字人渲染器走 Emscripten 的 instantiateStreaming，要求 .wasm
+# 必须以 application/wasm 返回，否则 WebAssembly.instantiateStreaming 直接拒绝。
+# 多数 Python 发行版的 mimetypes 已内置该映射，但打包环境（PyInstaller / 精简
+# 运行时的 mimetypes 库）不保证，这里显式兜底一次，成本为零。
+mimetypes.add_type("application/wasm", ".wasm")
 
 from src.utils.paths import get_project_root, get_resource_path
 
@@ -421,6 +429,23 @@ app.include_router(lorebooks_router)
 app.include_router(preferences_router)
 app.include_router(setup_guide_router)
 app.include_router(tools_router)
+
+# Serve uploaded images (before static frontend mount)
+uploads_dir = get_resource_path("uploads")
+if not os.path.exists(uploads_dir):
+    os.makedirs(uploads_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
+# DH_live 数字人渲染器资源（wasm ~4.7MB + 4 套形象 mp4/json ~17MB）。
+# StaticFiles 不带 Cache-Control，Electron/浏览器只能启发式缓存，首次加载慢且
+# 重建镜像后可能拿到旧缓存。这里对 /dh_live/ 显式下发长缓存；
+# 文件变更时靠内容替换（镜像重建）+ 用户硬刷新即可，无需指纹化文件名。
+@app.middleware("http")
+async def _dh_live_cache_header(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/dh_live/"):
+        response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
 
 # Serve frontend — must be mounted LAST (catches all remaining routes)
 static_dir = get_resource_path("static")

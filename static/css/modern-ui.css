@@ -1,0 +1,178 @@
+/* ═══════════════════════════════════════════════════════════════════
+   modern-ui.css — 网红聊天现代风覆盖层
+   加载顺序：必须在 styles.css / settings.css 之后（同特异性即覆盖）。
+   组成：
+     A. light 主题变量现代化（其余主题不动，随时可整文件下线回退）
+     B. 组件级精修（气泡/输入区/头部/侧栏/头像/滚动条），
+        基于现有 CSS 变量驱动，明暗主题都兼容。
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── A. light 主题现代化：米黄 → 冷白 + 活力粉紫 ── */
+[data-theme="light"] {
+  --bg-app: #f5f6fa;
+  --bg-panel: #ffffff;
+  --bg-sidebar: #eef0f6;
+  --bg-bubble-user: linear-gradient(135deg, #ff5c8a 0%, #a855f7 55%, #7c5cff 100%);
+  --bg-bubble-ai: #ffffff;
+  --border: #e6e8f0;
+  --text-primary: #17181c;
+  --text-secondary: #8a8f9e;
+  --accent: #a855f7;
+  --accent-hover: #9333ea;
+  --accent-dim: rgba(168, 85, 247, 0.10);
+  --bubble-user-border: transparent;
+  --active-bg: rgba(168, 85, 247, 0.12);
+}
+
+/* ── A2. body 同步（原样式按主题写死 body 背景，需同特异性覆盖） ── */
+[data-theme="light"] body {
+  background: #f5f6fa;
+}
+
+/* ── B1. 聊天主区：极淡的品牌色氛围光（仅 light；原样式按主题写死背景，需同特异性覆盖。
+     暗色主题保留原有氛围底色，靠下方组件级精修统一风格） ── */
+[data-theme="light"] .chat-main {
+  background:
+    radial-gradient(1200px 500px at 85% -10%, rgba(168, 85, 247, 0.07), transparent 60%),
+    radial-gradient(900px 420px at -10% 110%, rgba(255, 92, 138, 0.06), transparent 60%),
+    #f5f6fa;
+}
+
+/* ── B2. 头部：毛玻璃悬浮 ── */
+.chat-header {
+  background: color-mix(in srgb, var(--bg-panel) 72%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--border);
+}
+.header-avatar {
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 4px rgba(168, 85, 247, 0.55);
+}
+.header-avatar,
+.msg-avatar {
+  background: linear-gradient(135deg, #ff5c8a, #a855f7 60%, #7c5cff) !important;
+  color: #fff !important;
+  border: none !important;
+}
+
+/* ── B3. 气泡：大圆角 + 柔影，去硬边框 ── */
+.bubble {
+  border-radius: 20px;
+  padding: 12px 16px;
+  box-shadow: 0 1px 2px rgba(23, 24, 28, 0.04), 0 6px 18px rgba(23, 24, 28, 0.05);
+}
+.message-row.assistant .bubble {
+  border: 1px solid var(--border);
+}
+.message-row.user .bubble {
+  border: none;
+  background: linear-gradient(135deg, #ff5c8a 0%, #a855f7 55%, #7c5cff 100%);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.32);
+}
+/* 用户气泡内的行内元素在渐变底上的可读性 */
+.message-row.user .bubble code {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+.message-row.user .bubble a { color: #ffe1ec; }
+.message-row.user .bubble blockquote {
+  border-left-color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.92);
+}
+.bubble.streaming {
+  box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.35), 0 6px 18px rgba(168, 85, 247, 0.18);
+}
+
+/* ── B3.1 气泡内 markdown 链接/强调：用品牌色替代浏览器默认紫 ── */
+.bubble-content a,
+.bubble a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(168, 85, 247, 0.4);
+}
+.bubble-content a:hover,
+.bubble a:hover { border-bottom-style: solid; }
+
+/* ── B4. 输入区：悬浮胶囊 composer ── */
+.input-area {
+  background: transparent;
+  border-top: none;
+  padding: 10px 20px 16px;
+}
+.input-area .input-row {
+  background: var(--bg-panel);
+  border: 1.5px solid var(--border);
+  border-radius: 24px;
+  padding: 8px 8px 8px 6px;
+  box-shadow: 0 4px 20px rgba(23, 24, 28, 0.07);
+  transition: border-color 0.18s, box-shadow 0.18s;
+  align-items: flex-end;
+}
+.input-area .input-row:focus-within {
+  border-color: rgba(168, 85, 247, 0.55);
+  box-shadow: 0 4px 24px rgba(168, 85, 247, 0.16);
+}
+.input-area textarea {
+  background: transparent;
+  border: none;
+  padding: 8px 10px;
+  font-size: 15px;
+}
+.input-area textarea:focus { outline: none; border: none; }
+.send-btn {
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ff5c8a 0%, #a855f7 60%, #7c5cff 100%);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  padding: 10px 22px;
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.35);
+  transition: transform 0.12s, box-shadow 0.18s, opacity 0.18s;
+}
+.send-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #ff4d80 0%, #9b45e8 60%, #6b4df5 100%);
+  box-shadow: 0 6px 20px rgba(168, 85, 247, 0.45);
+}
+
+/* ── B5. 侧栏：会话卡片化 ── */
+.session-item {
+  border-radius: 14px;
+  margin: 2px 8px;
+  padding: 10px 12px;
+  transition: background 0.15s, transform 0.15s;
+}
+.session-item:hover { transform: translateX(2px); }
+.session-item.active {
+  background: var(--active-bg);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
+.session-avatar,
+.group-avatar {
+  box-shadow: 0 0 0 2px var(--bg-sidebar), 0 0 0 3.5px rgba(168, 85, 247, 0.45);
+}
+
+/* ── B6. 滚动条：细圆角 ── */
+.messages-area::-webkit-scrollbar { width: 8px; }
+.messages-area::-webkit-scrollbar-thumb {
+  background: rgba(138, 143, 158, 0.28);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.messages-area::-webkit-scrollbar-thumb:hover { background-color: rgba(138, 143, 158, 0.45); }
+
+/* ── B7. 系统通知气泡：细胶囊 ── */
+.system-notice-bubble {
+  border-radius: 999px;
+  padding: 4px 14px;
+  background: var(--accent-dim);
+  color: var(--text-secondary);
+}
+
+/* ── B8. 设置抽屉入口等工具按钮：统一圆角与悬停 ── */
+.toolbar-btn,
+.gear-btn {
+  border-radius: 12px;
+}

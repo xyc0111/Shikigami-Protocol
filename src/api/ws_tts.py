@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from fastapi import APIRouter, WebSocket
 from src.tts.registry import get_tts_provider
 from src.tts.text_preprocessor import preprocess_for_tts
 from src.tts.instruct_builder import build_instruct
+from src.tts.dh_audio import to_dh_wav
 from src.utils.debug_logger import log_tts_request, log_tts_response, log_error
 from src.utils.paths import get_project_root
 
@@ -173,10 +175,16 @@ async def tts_websocket(websocket: WebSocket):
     """
     WebSocket TTS endpoint.
     Client sends: text string
-    Server sends: MP3 audio bytes
+    Server sends: audio bytes
+
+    默认送 provider 原生格式（多为 MP3）。
+    带 `?format=dh` 时改为送 **16000Hz / 单声道 / PCM_16 WAV** —— 这是 DH_live
+    实时数字人渲染器 `Module._setAudioBuffer()` 驱动口型时唯一接受的格式。
+    复用同一条连接（而不是另开端点）可以省掉一次握手，对首响时间有实际收益。
     """
     await websocket.accept()
-    logger.info("[ws/tts] client connected")
+    dh_mode = (websocket.query_params.get("format") or "").strip().lower() == "dh"
+    logger.info("[ws/tts] client connected (format=%s)", "dh" if dh_mode else "native")
 
     try:
         while True:
@@ -211,6 +219,18 @@ async def tts_websocket(websocket: WebSocket):
 
             try:
                 audio_bytes = await tts.synthesize(text, **kwargs)
+
+                # ── 数字人通道：归一化为 16k/单声道/PCM16 WAV ────────────────
+                if audio_bytes and dh_mode:
+                    try:
+                        # 转码是纯 CPU 密集操作（soundfile 解码 + 重采样），放线程池避免阻塞事件循环
+                        audio_bytes = await asyncio.to_thread(to_dh_wav, audio_bytes)
+                    except Exception as e:
+                        # 转码失败时仍下发原始音频：宁可这一句口型不动，也不能让用户听不到回复。
+                        # 前端会嗅探 RIFF 头，非 WAV 的片段不会喂给渲染器。
+                        logger.warning("[ws/tts] dh 转码失败，降级下发原始音频: %s", e)
+                        log_error("ws_tts/dh_transcode", str(e))
+
                 if audio_bytes:
                     await websocket.send_bytes(audio_bytes)
                     log_tts_response(
